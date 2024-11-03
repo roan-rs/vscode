@@ -1,34 +1,80 @@
-mod completion;
+mod on_change;
+mod semantic;
 
+use std::mem;
+use std::path::PathBuf;
+use dashmap::DashMap;
+use roan_engine::module::Module;
+use roan_engine::source::Source;
+use ropey::Rope;
+use serde_json::Value;
+use tokio::net::{TcpListener, TcpStream};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
-use crate::completion::Completion;
+use crate::on_change::url_to_path;
+use crate::semantic::{semantic_tokens, LEGEND_TYPE};
 
 #[derive(Debug)]
 struct Backend {
     client: Client,
+    modules: DashMap<String, Module>,
+    ropes: DashMap<String, Rope>,
 }
-
-pub const LEGEND_TYPE: &[SemanticTokenType] = &[
-    SemanticTokenType::FUNCTION,
-    SemanticTokenType::VARIABLE,
-    SemanticTokenType::STRING,
-    SemanticTokenType::COMMENT,
-    SemanticTokenType::NUMBER,
-    SemanticTokenType::KEYWORD,
-    SemanticTokenType::OPERATOR,
-    SemanticTokenType::PARAMETER,
-];
 
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
     async fn initialize(&self, _: InitializeParams) -> Result<InitializeResult> {
         Ok(InitializeResult {
+            server_info: None,
             capabilities: ServerCapabilities {
-                hover_provider: Some(HoverProviderCapability::Simple(true)),
-                completion_provider: Some(CompletionOptions::default()),
-                ..Default::default()
+                text_document_sync: Some(TextDocumentSyncCapability::Kind(
+                    TextDocumentSyncKind::INCREMENTAL,
+                )),
+                completion_provider: Some(CompletionOptions {
+                    resolve_provider: Some(false),
+                    trigger_characters: Some(vec![".".to_string()]),
+                    work_done_progress_options: Default::default(),
+                    all_commit_characters: None,
+                    ..Default::default()
+                }),
+                execute_command_provider: Some(ExecuteCommandOptions {
+                    commands: vec!["dummy.do_something".to_string()],
+                    work_done_progress_options: Default::default(),
+                }),
+                workspace: Some(WorkspaceServerCapabilities {
+                    workspace_folders: Some(WorkspaceFoldersServerCapabilities {
+                        supported: Some(true),
+                        change_notifications: Some(OneOf::Left(true)),
+                    }),
+                    file_operations: None,
+                }),
+                semantic_tokens_provider: Some(
+                    SemanticTokensServerCapabilities::SemanticTokensRegistrationOptions(
+                        SemanticTokensRegistrationOptions {
+                            text_document_registration_options: {
+                                TextDocumentRegistrationOptions {
+                                    document_selector: Some(vec![DocumentFilter {
+                                        language: Some("roan".to_string()),
+                                        scheme: Some("file".to_string()),
+                                        pattern: None,
+                                    }]),
+                                }
+                            },
+                            semantic_tokens_options: SemanticTokensOptions {
+                                work_done_progress_options: WorkDoneProgressOptions::default(),
+                                legend: SemanticTokensLegend {
+                                    token_types: LEGEND_TYPE.into(),
+                                    token_modifiers: vec![],
+                                },
+                                range: Some(true),
+                                full: Some(SemanticTokensFullOptions::Bool(true)),
+                            },
+                            static_registration_options: StaticRegistrationOptions::default(),
+                        },
+                    ),
+                ),
+                ..ServerCapabilities::default()
             },
             ..Default::default()
         })
@@ -36,7 +82,7 @@ impl LanguageServer for Backend {
 
     async fn initialized(&self, _: InitializedParams) {
         self.client
-            .log_message(MessageType::INFO, "server initialized!")
+            .log_message(MessageType::INFO, "initialized!")
             .await;
     }
 
@@ -44,19 +90,125 @@ impl LanguageServer for Backend {
         Ok(())
     }
 
-    async fn hover(&self, _: HoverParams) -> Result<Option<Hover>> {
-        Ok(Some(Hover {
-            contents: HoverContents::Scalar(
-                MarkedString::String("You're hovering!".to_string())
-            ),
-            range: None
-        }))
+    async fn did_open(&self, did_open: DidOpenTextDocumentParams) {
+        self.client
+            .log_message(MessageType::INFO, "DID_OPEN")
+            .await;
+        
+        let path: PathBuf = url_to_path(&did_open.text_document.uri.to_string()).into();
+        let source = Source::from_path(path).expect("Failed to read file");
+
+        self.on_change(TextDocumentItem {
+            uri: did_open.text_document.uri,
+            language_id: did_open.text_document.language_id,
+            version: did_open.text_document.version,
+            text: did_open.text_document.text,
+        }, source).await;
     }
 
-    async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
-        let completion = Completion::new(params);
+    async fn did_change(&self, mut params: DidChangeTextDocumentParams) {
+        self.client
+            .log_message(MessageType::INFO, "DID_CHANGE")
+            .await;
 
-        completion.response()
+        let path: PathBuf = url_to_path(&params.text_document.uri.to_string()).into();
+
+        let source = Source::from_path(path).expect("Failed to read file");
+        
+        self.on_change(TextDocumentItem {
+            uri: params.text_document.uri.clone(),
+            language_id: "roan".to_string(),
+            version: params.text_document.version,
+            text: params.content_changes.pop().unwrap().text,
+        }, source).await;
+    }
+    async fn did_save(&self, _: DidSaveTextDocumentParams) {
+        self.client
+            .log_message(MessageType::INFO, "DID_SAVE")
+            .await;
+    }
+
+    async fn did_close(&self, _: DidCloseTextDocumentParams) {
+        self.client
+            .log_message(MessageType::INFO, "DID_CLOSE")
+            .await;
+    }
+
+    async fn completion(&self, _: CompletionParams) -> Result<Option<CompletionResponse>> {
+        Ok(Some(CompletionResponse::Array(vec![
+            CompletionItem::new_simple("Hello".to_string(), "Some detail".to_string()),
+            CompletionItem::new_simple("Bye".to_string(), "More detail".to_string()),
+        ])))
+    }
+
+    async fn did_change_configuration(&self, _: DidChangeConfigurationParams) {
+        self.client
+            .log_message(MessageType::INFO, "configuration changed!")
+            .await;
+    }
+
+    async fn did_change_workspace_folders(&self, _: DidChangeWorkspaceFoldersParams) {
+        self.client
+            .log_message(MessageType::INFO, "workspace folders changed!")
+            .await;
+    }
+
+    async fn did_change_watched_files(&self, _: DidChangeWatchedFilesParams) {
+        self.client
+            .log_message(MessageType::INFO, "watched files have changed!")
+            .await;
+    }
+
+    async fn execute_command(&self, _: ExecuteCommandParams) -> Result<Option<Value>> {
+        self.client
+            .log_message(MessageType::INFO, "command executed!")
+            .await;
+
+        match self.client.apply_edit(WorkspaceEdit::default()).await {
+            Ok(res) if res.applied => self.client.log_message(MessageType::INFO, "applied").await,
+            Ok(_) => self.client.log_message(MessageType::INFO, "rejected").await,
+            Err(err) => self.client.log_message(MessageType::ERROR, err).await,
+        }
+
+        Ok(None)
+    }
+
+    async fn semantic_tokens_full(
+        &self,
+        params: SemanticTokensParams,
+    ) -> Result<Option<SemanticTokensResult>> {
+        let uri = params.text_document.uri.to_string();
+        self.client
+            .log_message(MessageType::LOG, "semantic_token_full")
+            .await;
+
+        let module = self.modules.get(&uri).unwrap().value().clone();
+        let rope = self.ropes.get(&uri).unwrap().value().clone();
+        let tokens = semantic_tokens(module, rope);
+
+        Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
+            result_id: None,
+            data: tokens,
+        })))
+    }
+
+    async fn semantic_tokens_range(
+        &self,
+        params: SemanticTokensRangeParams,
+    ) -> Result<Option<SemanticTokensRangeResult>> {
+        let uri = params.text_document.uri.to_string();
+        self.client
+            .log_message(MessageType::LOG, "semantic_token_range")
+            .await;
+
+        let module = self.modules.get(&uri).unwrap().value().clone();
+        let rope = self.ropes.get(&uri).unwrap().value().clone();
+        let tokens = semantic_tokens(module, rope);
+
+        Ok(Some(SemanticTokensRangeResult::Tokens(SemanticTokens {
+            result_id: None,
+            data: tokens,
+        })))
     }
 }
 
@@ -65,6 +217,6 @@ async fn main() {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
 
-    let (service, socket) = LspService::new(|client| Backend { client });
+    let (service, socket) = LspService::new(|client| Backend { client, modules: Default::default(), ropes: Default::default() });
     Server::new(stdin, stdout, socket).serve(service).await;
 }

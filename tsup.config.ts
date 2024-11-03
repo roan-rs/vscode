@@ -16,24 +16,4 @@ export default defineConfig({
     watch,
     platform: "node",
     external: ["vscode", "vscode-languageclient"],
-    onSuccess: async () => {
-        // Copy the server binary to the dist folder
-        const file = path.join(
-            __dirname,
-            "server",
-            "target",
-            "release",
-            "roan-language-server.exe",
-        );
-
-        if (!fs.existsSync(file)) {
-            console.error("Server binary not found.");
-            process.exit(1);
-        }
-
-        fs.copyFileSync(
-            file,
-            path.join(__dirname, "dist", "roan-language-server.exe"),
-        );
-    },
 });

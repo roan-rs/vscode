@@ -33,15 +33,9 @@ const outputChannel = window.createOutputChannel("Roan Extension");
 export async function activate(context: ExtensionContext) {
 	outputChannel.appendLine("Activating Roan Language Server extension...");
 
-	const traceOutputChannel = window.createOutputChannel(
-		"Roan Language Server trace",
-	);
-
-	outputChannel.appendLine(process.cwd());
-	const command = path.join(
-		__dirname,
-		"roan-language-server.exe",
-	);
+	// I know this is bad, but only for development
+	const command =
+		"C:\\dev\\roan\\roan-language\\server\\target\\release\\roan-language-server.exe";
 
 	const run: Executable = {
 		command,
@@ -62,7 +56,6 @@ export async function activate(context: ExtensionContext) {
 		synchronize: {
 			fileEvents: workspace.createFileSystemWatcher("**/.clientrc"),
 		},
-		traceOutputChannel,
 	};
 
 	client = new LanguageClient(
