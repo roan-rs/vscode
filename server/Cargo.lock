@@ -580,9 +580,9 @@ dependencies = [
 
 [[package]]
 name = "roan-error"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0e231c1f985bdb142dc35c995af68a6c0ced9ae65530a0130e985fda505a39b5"
+checksum = "d7a393d20e0c44017caf8d059a69159a54ff8236fa6bdbfd7c9ba2b8e22c9365"
 dependencies = [
  "anyhow",
  "colored",
